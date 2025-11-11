@@ -177,31 +177,20 @@ threads.STATUS_UNDEFINED = 0
 threads.STATUS_COMPLETED = 1
 threads.STATUS_ERROR = 2
 
-local thread_func_signature = ffi.typeof"void *(*)(void *)"
-local thread_data_t = ffi.typeof([[
-struct {
-	char *input_buffer;
-	uint32_t input_buffer_len;
-	char *output_buffer;
-	uint32_t output_buffer_len;
-	void *shared_pointer;
-	uint8_t status;
-}
-]])
-threads.thread_data_ptr_t = ffi.typeof("$*", thread_data_t)
+local void_p_void_p = ffi.typeof"void *(*)(void *)"
 
 do
 	local Lua = require 'lua'
 
-	local meta = {}
-	meta.__index = meta
+	local Thread = {}
+	Thread.__index = Thread
 
 	-- Automatic cleanup when thread object is garbage collected
-	function meta:__gc()
+	function Thread:__gc()
 		self:close()
 	end
 
-	function meta:close()
+	function Thread:close()
 		if self.lua then
 			self.lua:close()
 			self.lua = nil
@@ -209,87 +198,34 @@ do
 	end
 
 	function threads.new(func)
-		local self = setmetatable({}, meta)
+		local self = setmetatable({}, Thread)
 		self.lua = Lua()
+
+		-- all this does is run ffi.cast of a function to a pointer ... but within a new Lua state ...
 		local func_ptr = self.lua([[
 local run = ...
-local ffi = require("ffi")
-local threads = require("pureffi.threads")
-
-local function main(udata)
-	local data = ffi.cast(threads.thread_data_ptr_t, udata)
-
-	if data.shared_pointer ~= nil then
-		local result = run(data.shared_pointer)
-
-		data.status = threads.STATUS_COMPLETED
-
-		-- Return nothing (results written to shared memory)
-		return nil
-	end
-
-	local input = threads.pointer_decode(data.input_buffer, tonumber(data.input_buffer_len))
-	local buf, ptr, len = threads.pointer_encode(run(input))
-
-	data.output_buffer = ptr
-	data.output_buffer_len = len
-
-	data.status = threads.STATUS_COMPLETED
-
-	return nil
-end
-
-_G.main_ref = main
-_G.main_closure = ffi.cast("void *(*)(void *)", main)
-return main_closure
+local ffi = require 'ffi'
+local runClosure = ffi.cast("void *(*)(void *)", run)
+-- just in case luajit gc's this
+-- in its docs luajit warns that you have to gc the closures manually, so I think I'm safe (except for leaking memory)
+_G.run = run
+_G.runClosure = runClosure
+return runClosure
 ]],
 			func
 		)
-		self.func_ptr = ffi.cast(thread_func_signature, func_ptr)
+		self.func_ptr = ffi.cast(void_p_void_p, func_ptr)
 		return self
 	end
 
-	function meta:run(obj, shared_ptr)
-		if shared_ptr then
-			self.buffer = nil
-			self.shared_ptr_ref = obj
-			self.input_data = thread_data_t({shared_pointer = ffi.cast("void *", obj)})
-			self.shared_mode = true
-		else
-			local buf, ptr, len = threads.pointer_encode(obj)
-			self.buffer = buf
-			self.input_data = thread_data_t({input_buffer = ptr, input_buffer_len = len})
-			self.shared_mode = false
-		end
-
-		self.id = threads.run_thread(self.func_ptr, self.input_data)
-	end
-
-	function meta:is_done()
-		return self.input_data and self.input_data.status == threads.STATUS_COMPLETED
-	end
-
-	function meta:join()
+	function Thread:join()
 		threads.join_thread(self.id)
 
-		if self.shared_mode then
-			-- Shared memory mode: no result to deserialize
-			self.buffer = nil
-			self.input_data = nil
-			self.shared_ptr_ref = nil
-			return nil
-		else
-			local result = threads.pointer_decode(self.input_data.output_buffer, self.input_data.output_buffer_len)
-			local status = self.input_data.status
-			self.buffer = nil
-			self.input_data = nil
-
-			if status == threads.STATUS_ERROR then
-				return result[1], result[2]
-			end
-
-			return result
-		end
+		assert(self.shared_mode)
+		-- Shared memory mode: no result to deserialize
+		self.buffer = nil
+		self.input_data = nil
+		return nil
 	end
 end
 
@@ -329,9 +265,7 @@ struct {
 		self.control = thread_control_array_t(num_threads)
 		local worker_func_str = string.dump(worker_func)
 
-		-- Keep buffers alive so pointers remain valid
 		self.work_buffers = {}
-		self.result_buffers = {}
 
 		-- Initialize control structures
 		for i = 0, num_threads - 1 do
@@ -382,7 +316,9 @@ struct {
 				ffi.C.sem_post(ctrl.semWorkDone)
 			end
 
-			return thread_id
+			-- thread signature returns void*
+			-- pass anything other than void* and luajit function cast will complain
+			return nil
 		end
 
 		-- Create and start persistent threads
@@ -391,7 +327,12 @@ struct {
 			local thread = threads.new(persistent_worker)
 			-- Pass the control structure pointer as shared memory
 			-- and the worker function as serialized data
-			thread:run(ctrl, true)
+
+			thread.buffer = nil
+			thread.input_data = ffi.cast("void *", ctrl)
+			thread.shared_mode = true
+			thread.id = threads.run_thread(thread.func_ptr, thread.input_data)
+
 			self.thread_objects[i] = thread
 			ctrl = ctrl + 1
 		end
