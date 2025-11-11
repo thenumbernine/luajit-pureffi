@@ -225,8 +225,8 @@ do
 	function threads.new(func)
 		local self = setmetatable({}, meta)
 		self.lua = Lua()
-		local func_ptr = self.lua:load([[
-local run = assert(load(...))
+		local func_ptr = self.lua([[
+local run = ...
 local ffi = require("ffi")
 local threads = require("pureffi.threads")
 
