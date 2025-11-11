@@ -273,7 +273,8 @@ end
 
 _G.main_ref = main_protected
 
-return ffi.new("uintptr_t[1]", ffi.cast("uintptr_t", ffi.cast("void *(*)(void *)", main_protected)))
+local func_closure = ffi.cast("void *(*)(void *)", main_protected)
+return func_closure
 ]],
 			func
 		)
