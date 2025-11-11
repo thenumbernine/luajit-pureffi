@@ -205,30 +205,27 @@ struct {
 threads.thread_data_ptr_t = ffi.typeof("$*", thread_data_t)
 
 do
-	local lua = require 'pureffi.lua'
+	local Lua = require 'lua'
 
 	local meta = {}
 	meta.__index = meta
 
 	-- Automatic cleanup when thread object is garbage collected
 	function meta:__gc()
-		if self.lua_state then
-			self.lua_state:close()
-			self.lua_state = nil
-		end
+		self:close()
 	end
 
 	function meta:close()
-		if self.lua_state then
-			self.lua_state:close()
-			self.lua_state = nil
+		if self.lua then
+			self.lua:close()
+			self.lua = nil
 		end
 	end
 
 	function threads.new(func)
 		local self = setmetatable({}, meta)
-		local L = lua.create_state()
-		local func_ptr = L:get_function_pointer([[
+		self.lua = Lua()
+		local func_ptr = self.lua:load([[
 local run = assert(load(...))
 local ffi = require("ffi")
 local threads = require("pureffi.threads")
@@ -280,7 +277,6 @@ return ffi.new("uintptr_t[1]", ffi.cast("uintptr_t", ffi.cast("void *(*)(void *)
 ]],
 			func
 		)
-		self.lua_state = L
 		self.func_ptr = ffi.cast(thread_func_signature, func_ptr)
 		return self
 	end

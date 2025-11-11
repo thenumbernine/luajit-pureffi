@@ -6,33 +6,33 @@ local signals = {
 	SIGSEGV = 11,
 }
 ffi.cdef([[
-    typedef struct lua_State lua_State;
-    lua_State *luaL_newstate(void);
-    void luaL_openlibs(lua_State *L);
-    void lua_close(lua_State *L);
-    int luaL_loadstring(lua_State *L, const char *s);
-    int lua_pcall(lua_State *L, int nargs, int nresults, int errfunc);
-    void lua_getfield(lua_State *L, int index, const char *k);
-    void lua_settop(lua_State *L, int index);
-    void lua_pop(lua_State *L, int n);
-    const char *lua_tolstring(lua_State *L, int index, size_t *len);
-    ptrdiff_t lua_tointeger(lua_State *L, int index);
-    int lua_gettop(lua_State *L);
-    void lua_pushstring(lua_State *L, const char *s);
-    const void *lua_topointer(lua_State *L, int index);
-    double lua_tonumber(lua_State *L, int index);
-    void *lua_touserdata(lua_State *L, int idx);
-    void lua_pushlstring(lua_State *L, const char *p, size_t len);
+typedef struct lua_State lua_State;
+lua_State *luaL_newstate(void);
+void luaL_openlibs(lua_State *L);
+void lua_close(lua_State *L);
+int luaL_loadstring(lua_State *L, const char *s);
+int lua_pcall(lua_State *L, int nargs, int nresults, int errfunc);
+void lua_getfield(lua_State *L, int index, const char *k);
+void lua_settop(lua_State *L, int index);
+void lua_pop(lua_State *L, int n);
+const char *lua_tolstring(lua_State *L, int index, size_t *len);
+ptrdiff_t lua_tointeger(lua_State *L, int index);
+int lua_gettop(lua_State *L);
+void lua_pushstring(lua_State *L, const char *s);
+const void *lua_topointer(lua_State *L, int index);
+double lua_tonumber(lua_State *L, int index);
+void *lua_touserdata(lua_State *L, int idx);
+void lua_pushlstring(lua_State *L, const char *p, size_t len);
 
-    void luaL_traceback(lua_State *L, lua_State *L1, const char *msg, int level);
-    int luaL_loadfile(lua_State *L, const char *filename);
+void luaL_traceback(lua_State *L, lua_State *L1, const char *msg, int level);
+int luaL_loadfile(lua_State *L, const char *filename);
 
-	typedef void (*sighandler_t)(int32_t);
-	sighandler_t signal(int32_t signum, sighandler_t handler);
-	uint32_t getpid();
-	int backtrace (void **buffer, int size);
-	char ** backtrace_symbols_fd(void *const *buffer, int size, int fd);
-	int kill(uint32_t pid, int sig);
+typedef void (*sighandler_t)(int32_t);
+sighandler_t signal(int32_t signum, sighandler_t handler);
+uint32_t getpid();
+int backtrace (void **buffer, int size);
+char ** backtrace_symbols_fd(void *const *buffer, int size, int fd);
+int kill(uint32_t pid, int sig);
 ]])
 local LUA_GLOBALSINDEX = -10002
 local state = ffi.C.luaL_newstate()
