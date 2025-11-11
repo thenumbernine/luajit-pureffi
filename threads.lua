@@ -125,7 +125,8 @@ else
 
 		int usleep(unsigned int usecs);
 	]]
-	local pt = ffi.load("pthread")
+	--local pt = ffi.load("pthread")
+	local pt = ffi.load("libpthread.so.0")
 
 	-- Enhanced pthread error checking
 	local function check_pthread(int)
@@ -188,72 +189,19 @@ threads.STATUS_UNDEFINED = 0
 threads.STATUS_COMPLETED = 1
 threads.STATUS_ERROR = 2
 
-local thread_func_signature = "void *(*)(void *)"
-local thread_data_t = ffi.typeof([[
-	struct {
-		char *input_buffer;
-		uint32_t input_buffer_len;
-		char *output_buffer;
-		uint32_t output_buffer_len;
-		void *shared_pointer;
-		uint8_t status;
-	}
-]])
+local thread_func_signature = ffi.typeof"void *(*)(void *)"
+local thread_data_t = ffi.typeof([[struct {
+	char *input_buffer;
+	uint32_t input_buffer_len;
+	char *output_buffer;
+	uint32_t output_buffer_len;
+	void *shared_pointer;
+	uint8_t status;
+}]])
 threads.thread_data_ptr_t = ffi.typeof("$*", thread_data_t)
 
 do
-	local LUA_GLOBALSINDEX = -10002
-	ffi.cdef[[
-        typedef struct lua_State lua_State;
-        lua_State *luaL_newstate(void);
-        void luaL_openlibs(lua_State *L);
-        void lua_close(lua_State *L);
-        int luaL_loadstring(lua_State *L, const char *s);
-        int lua_pcall(lua_State *L, int nargs, int nresults, int errfunc);
-        void lua_getfield(lua_State *L, int index, const char *k);
-        void lua_settop(lua_State *L, int index);
-        void lua_pop(lua_State *L, int n);
-        const char *lua_tolstring(lua_State *L, int index, size_t *len);
-        ptrdiff_t lua_tointeger(lua_State *L, int index);
-        int lua_gettop(lua_State *L);
-        void lua_pushstring(lua_State *L, const char *s);
-        const void *lua_topointer(lua_State *L, int index);
-        double lua_tonumber(lua_State *L, int index);
-        void *lua_touserdata(lua_State *L, int idx);
-        void lua_pushlstring(lua_State *L, const char *p, size_t len);
-    ]]
-
-	local function create_state()
-		local L = ffi.C.luaL_newstate()
-
-		if L == nil then error("Failed to create new Lua state: Out of memory", 2) end
-
-		ffi.C.luaL_openlibs(L)
-		return L
-	end
-
-	local function close_state(L)
-		ffi.C.lua_close(L)
-	end
-
-	local function check_error(L, ret)
-		if ret == 0 then return end
-
-		local chr = ffi.C.lua_tolstring(L, -1, nil)
-		local msg = ffi.string(chr)
-		error(msg, 2)
-	end
-
-	local function get_function_pointer(L, code, func)
-		check_error(L, ffi.C.luaL_loadstring(L, code))
-		local str = string.dump(func)
-		ffi.C.lua_pushlstring(L, str, #str)
-		check_error(L, ffi.C.lua_pcall(L, 1, 1, 0))
-		local ptr = ffi.C.lua_topointer(L, -1)
-		ffi.C.lua_settop(L, -2)
-		local box = ffi.cast("uintptr_t*", ptr)
-		return box[0]
-	end
+	local lua = require 'pureffi.lua'
 
 	local meta = {}
 	meta.__index = meta
@@ -261,66 +209,71 @@ do
 	-- Automatic cleanup when thread object is garbage collected
 	function meta:__gc()
 		if self.lua_state then
-			close_state(self.lua_state)
+			self.lua_state:close()
+			self.lua_state = nil
+		end
+	end
+
+	function meta:close()
+		if self.lua_state then
+			self.lua_state:close()
 			self.lua_state = nil
 		end
 	end
 
 	function threads.new(func)
 		local self = setmetatable({}, meta)
-		local L = create_state()
-		local func_ptr = get_function_pointer(
-			L,
-			[[
-            local run = assert(load(...))
-            local ffi = require("ffi")
-			local threads = require("threads")
+		local L = lua.create_state()
+		local func_ptr = L:get_function_pointer([[
+local run = assert(load(...))
+local ffi = require("ffi")
+local threads = require("pureffi.threads")
 
-            local function main(udata)
-                local data = ffi.cast(threads.thread_data_ptr_t, udata)
+local function main(udata)
+	local data = ffi.cast(threads.thread_data_ptr_t, udata)
 
-                if data.shared_pointer ~= nil then
-                    local result = run(data.shared_pointer)
+	if data.shared_pointer ~= nil then
+		local result = run(data.shared_pointer)
 
-                    data.status = threads.STATUS_COMPLETED
+		data.status = threads.STATUS_COMPLETED
 
-                    -- Return nothing (results written to shared memory)
-                    return nil
-				end
+		-- Return nothing (results written to shared memory)
+		return nil
+	end
 
-				local input = threads.pointer_decode(data.input_buffer, tonumber(data.input_buffer_len))
-				local buf, ptr, len = threads.pointer_encode(run(input))
+	local input = threads.pointer_decode(data.input_buffer, tonumber(data.input_buffer_len))
+	local buf, ptr, len = threads.pointer_encode(run(input))
 
-				data.output_buffer = ptr
-				data.output_buffer_len = len
+	data.output_buffer = ptr
+	data.output_buffer_len = len
 
-				data.status = threads.STATUS_COMPLETED
+	data.status = threads.STATUS_COMPLETED
 
-				return nil
-            end
+	return nil
+end
 
-			local function main_protected(udata)
-				local ok, err_or_ptr = pcall(main, udata)
-				if not ok then
-					local data = ffi.cast(threads.thread_data_ptr_t, udata)
+local function main_protected(udata)
+	local ok, err_or_ptr = pcall(main, udata)
+	if not ok then
+		local data = ffi.cast(threads.thread_data_ptr_t, udata)
 
-					data.status = threads.STATUS_ERROR
+		data.status = threads.STATUS_ERROR
 
-					local data = ffi.cast(threads.thread_data_ptr_t, udata)
-					local buf, ptr, len = threads.pointer_encode({ok, err_or_ptr})
-					data.output_buffer = ptr
-					data.output_buffer_len = len
+		local data = ffi.cast(threads.thread_data_ptr_t, udata)
+		local buf, ptr, len = threads.pointer_encode({ok, err_or_ptr})
+		data.output_buffer = ptr
+		data.output_buffer_len = len
 
-					return nil
-				end
+		return nil
+	end
 
-				return err_or_ptr
-			end
+	return err_or_ptr
+end
 
-			_G.main_ref = main_protected
+_G.main_ref = main_protected
 
-            return ffi.new("uintptr_t[1]", ffi.cast("uintptr_t", ffi.cast("void *(*)(void *)", main_protected)))
-        ]],
+return ffi.new("uintptr_t[1]", ffi.cast("uintptr_t", ffi.cast("void *(*)(void *)", main_protected)))
+]],
 			func
 		)
 		self.lua_state = L
@@ -369,10 +322,6 @@ do
 
 			return result
 		end
-	end
-
-	function meta:close()
-		close_state(self.lua_state)
 	end
 end
 
@@ -432,7 +381,7 @@ do
 		-- Create persistent worker that loops waiting for work
 		local persistent_worker = function(shared_ptr)
 			local ffi = require("ffi")
-			local threads = require("threads")
+			local threads = require("pureffi.threads")
 			local buffer = require("string.buffer")
 			local control = ffi.cast(threads.thread_control_ptr_t, shared_ptr)
 			local thread_id = control.thread_id
@@ -529,12 +478,12 @@ do
 	-- Shutdown the thread pool
 	function pool_meta:shutdown()
 		-- Signal all threads to exit
-		for i = 0, self.num_threads - 1 do
+		for i = 0,self.num_threads - 1 do
 			self.control[i].should_exit = 1
 		end
 
 		-- Wait for threads to exit and clean up
-		for i = 1, self.num_threads do
+		for i = 1,self.num_threads do
 			self.thread_objects[i]:join()
 			self.thread_objects[i]:close()
 		end
