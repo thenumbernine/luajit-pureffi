@@ -6,43 +6,43 @@ require 'ffi.req' 'c.semaphore'
 
 if ffi.os == "Windows" then
 	ffi.cdef[[
-		typedef uint32_t (*thread_callback)(void*);
+typedef uint32_t (*thread_callback)(void*);
 
-        void* CreateThread(
-            void* lpThreadAttributes,
-            size_t dwStackSize,
-            thread_callback lpStartAddress,
-            void* lpParameter,
-            uint32_t dwCreationFlags,
-            uint32_t* lpThreadId
-        );
-        uint32_t WaitForSingleObject(void* hHandle, uint32_t dwMilliseconds);
-        int CloseHandle(void* hObject);
-        uint32_t GetLastError(void);
-        int32_t GetExitCodeThread(void* hThread, uint32_t* lpExitCode);
+void* CreateThread(
+	void* lpThreadAttributes,
+	size_t dwStackSize,
+	thread_callback lpStartAddress,
+	void* lpParameter,
+	uint32_t dwCreationFlags,
+	uint32_t* lpThreadId
+);
+uint32_t WaitForSingleObject(void* hHandle, uint32_t dwMilliseconds);
+int CloseHandle(void* hObject);
+uint32_t GetLastError(void);
+int32_t GetExitCodeThread(void* hThread, uint32_t* lpExitCode);
 
-		typedef struct _SYSTEM_INFO {
-            union {
-                uint32_t dwOemId;
-                struct {
-                    uint16_t wProcessorArchitecture;
-                    uint16_t wReserved;
-                };
-            };
-            uint32_t dwPageSize;
-            void* lpMinimumApplicationAddress;
-            void* lpMaximumApplicationAddress;
-            size_t dwActiveProcessorMask;
-            uint32_t dwNumberOfProcessors;
-            uint32_t dwProcessorType;
-            uint32_t dwAllocationGranularity;
-            uint16_t wProcessorLevel;
-            uint16_t wProcessorRevision;
-        } SYSTEM_INFO;
+typedef struct _SYSTEM_INFO {
+	union {
+		uint32_t dwOemId;
+		struct {
+			uint16_t wProcessorArchitecture;
+			uint16_t wReserved;
+		};
+	};
+	uint32_t dwPageSize;
+	void* lpMinimumApplicationAddress;
+	void* lpMaximumApplicationAddress;
+	size_t dwActiveProcessorMask;
+	uint32_t dwNumberOfProcessors;
+	uint32_t dwProcessorType;
+	uint32_t dwAllocationGranularity;
+	uint16_t wProcessorLevel;
+	uint16_t wProcessorRevision;
+} SYSTEM_INFO;
 
-        void GetSystemInfo(SYSTEM_INFO* lpSystemInfo);
+void GetSystemInfo(SYSTEM_INFO* lpSystemInfo);
 
-		void Sleep(uint32_t dwMilliseconds);
+void Sleep(uint32_t dwMilliseconds);
     ]]
 	local kernel32 = ffi.load("kernel32")
 
@@ -109,23 +109,23 @@ if ffi.os == "Windows" then
 	end
 else
 	ffi.cdef[[
-		typedef uint64_t pthread_t;
+typedef uint64_t pthread_t;
 
-		typedef struct {
-			uint32_t flags;
-			void * stack_base;
-			size_t stack_size;
-			size_t guard_size;
-			int32_t sched_policy;
-			int32_t sched_priority;
-		} pthread_attr_t;
+typedef struct {
+	uint32_t flags;
+	void * stack_base;
+	size_t stack_size;
+	size_t guard_size;
+	int32_t sched_policy;
+	int32_t sched_priority;
+} pthread_attr_t;
 
-		int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg);
-		int pthread_join(pthread_t thread, void **value_ptr);
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg);
+int pthread_join(pthread_t thread, void **value_ptr);
 
-		long sysconf(int name);
+long sysconf(int name);
 
-		int usleep(unsigned int usecs);
+int usleep(unsigned int usecs);
 	]]
 	--local pt = ffi.load("pthread")
 	local pt = ffi.load("libpthread.so.0")
@@ -192,14 +192,16 @@ threads.STATUS_COMPLETED = 1
 threads.STATUS_ERROR = 2
 
 local thread_func_signature = ffi.typeof"void *(*)(void *)"
-local thread_data_t = ffi.typeof([[struct {
+local thread_data_t = ffi.typeof([[
+struct {
 	char *input_buffer;
 	uint32_t input_buffer_len;
 	char *output_buffer;
 	uint32_t output_buffer_len;
 	void *shared_pointer;
 	uint8_t status;
-}]])
+}
+]])
 threads.thread_data_ptr_t = ffi.typeof("$*", thread_data_t)
 
 do
@@ -356,7 +358,7 @@ do
 	local thread_control_array_t = ffi.typeof("$[?]", thread_control_t)
 
 	-- Create a new thread pool
-	function threads.new_pool(worker_func, num_threads)
+	function threads.new_pool(worker_func, num_threads, workData)
 		local self = setmetatable({}, pool_meta)
 		self.num_threads = num_threads or 8
 		self.worker_func = worker_func
@@ -365,9 +367,14 @@ do
 		self.control = thread_control_array_t(num_threads)
 		local worker_func_str = string.dump(worker_func)
 
+		-- Keep buffers alive so pointers remain valid
+		self.work_buffers = {}
+		self.result_buffers = {}
+
 		-- Initialize control structures
 		for i = 0, num_threads - 1 do
 			local ctrl = self.control + i
+			ctrl.thread_id = i + 1 -- 1-based for Lua
 			--[[ using work_done
 			ctrl.work_available = 0
 			ctrl.work_done = 1
@@ -379,16 +386,17 @@ do
 			ctrl.should_exit = 0
 			ctrl.worker_func = worker_func_str
 			ctrl.worker_func_len = #worker_func_str
-			ctrl.work_data = nil
-			ctrl.work_data_len = 0
+			local ctrlWorkData = workData and workData[i+1]
+			if not ctrlWorkData then
+				ctrl.work_data = nil
+				ctrl.work_data_len = 0
+			else
+				self:setwork(i+1, ctrlWorkData)
+			end
 			ctrl.result_data = nil
 			ctrl.result_data_len = 0
-			ctrl.thread_id = i + 1 -- 1-based for Lua
 		end
 
-		-- Keep buffers alive so pointers remain valid
-		self.work_buffers = {}
-		self.result_buffers = {}
 		-- Create persistent worker that loops waiting for work
 		local persistent_worker = function(shared_ptr)
 			local ffi = require("ffi")
@@ -398,6 +406,10 @@ do
 			local thread_id = ctrl.thread_id
 			-- Get the actual worker function from the serialized input
 			local worker_func = assert(load(ffi.string(ctrl.worker_func, ctrl.worker_func_len)))
+
+			-- [[ this was every iteration.  now I'm just doing it once up front.
+			local work = threads.pointer_decode(ctrl.work_data, ctrl.work_data_len)
+			--]]
 
 			-- Thread loop: wait for work, process it, repeat
 			while true do
@@ -414,6 +426,7 @@ do
 				if ctrl.should_exit == 1 then break end
 				do
 				--]]
+					--[[ me just doing away with work thread update results altogether
 					-- Deserialize work data
 					local work = threads.pointer_decode(ctrl.work_data, ctrl.work_data_len)
 					-- Process it with the worker function
@@ -422,6 +435,11 @@ do
 					-- Store result pointer in ctrl structure
 					ctrl.result_data = result_ptr
 					ctrl.result_data_len = result_len
+					--]]
+					-- [[ ... instead
+					worker_func(work)
+					--]]
+
 					--[[ using work_done
 					-- Mark as done
 					ctrl.work_available = 0
