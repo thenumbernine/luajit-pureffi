@@ -108,27 +108,13 @@ void Sleep(uint32_t dwMilliseconds);
 		ffi.C.Sleep(ms)
 	end
 else
-	ffi.cdef[[
-typedef uint64_t pthread_t;
+	require 'ffi.req' 'c.pthread'	-- pthread_create, pthread_join
+	require 'ffi.req' 'c.unistd'	-- sysconf, usleep
 
-typedef struct {
-	uint32_t flags;
-	void * stack_base;
-	size_t stack_size;
-	size_t guard_size;
-	int32_t sched_policy;
-	int32_t sched_priority;
-} pthread_attr_t;
-
-int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg);
-int pthread_join(pthread_t thread, void **value_ptr);
-
-long sysconf(int name);
-
-int usleep(unsigned int usecs);
-	]]
+	-- needed? not on linux?
 	--local pt = ffi.load("pthread")
-	local pt = ffi.load("libpthread.so.0")
+	--local pt = ffi.load("libpthread.so.0")
+	local pt = ffi.C
 
 	-- Enhanced pthread error checking
 	local function check_pthread(int)
