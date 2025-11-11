@@ -253,27 +253,9 @@ local function main(udata)
 	return nil
 end
 
-local function main_protected(udata)
-	local ok, err_or_ptr = pcall(main, udata)
-	if not ok then
-		local data = ffi.cast(threads.thread_data_ptr_t, udata)
+_G.main_ref = main
 
-		data.status = threads.STATUS_ERROR
-
-		local data = ffi.cast(threads.thread_data_ptr_t, udata)
-		local buf, ptr, len = threads.pointer_encode({ok, err_or_ptr})
-		data.output_buffer = ptr
-		data.output_buffer_len = len
-
-		return nil
-	end
-
-	return err_or_ptr
-end
-
-_G.main_ref = main_protected
-
-local func_closure = ffi.cast("void *(*)(void *)", main_protected)
+local func_closure = ffi.cast("void *(*)(void *)", main)
 return func_closure
 ]],
 			func
