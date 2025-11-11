@@ -456,7 +456,7 @@ else
 			local handle = ffi.C.FindFirstFileA(path .. "*", data)
 
 			if handle == nil then
-				list.insert(errors, {path = path, error = last_error()})
+				table.insert(errors, {path = path, error = last_error()})
 				return
 			end
 
