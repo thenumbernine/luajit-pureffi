@@ -2,6 +2,8 @@ local ffi = require("ffi")
 local buffer = require("string.buffer")
 local threads = {}
 
+require 'ffi.req' 'c.semaphore'
+
 if ffi.os == "Windows" then
 	ffi.cdef[[
 		typedef uint32_t (*thread_callback)(void*);
@@ -315,7 +317,7 @@ return ffi.new("uintptr_t[1]", ffi.cast("uintptr_t", ffi.cast("void *(*)(void *)
 			local status = self.input_data.status
 			self.buffer = nil
 			self.input_data = nil
-			
+
 			if status == threads.STATUS_ERROR then
 				return result[1], result[2]
 			end
@@ -331,21 +333,24 @@ do
 	pool_meta.__index = pool_meta
 	-- Define shared memory structure for thread pool communication
 	-- Each thread has: work_available, work_done, should_exit flags
-	local thread_control_t = ffi.typeof[[
-		struct {
-			volatile int work_available;
-			volatile int work_done;
-			volatile int should_exit;
-			const char* worker_func;  // Serialized worker function
-			size_t worker_func_len;  // Length of serialized worker function
-			const char* work_data;  // Serialized work data
-			size_t work_data_len;  // Length of work data
-			char* result_data;  // Serialized result data
-			size_t result_data_len;  // Length of result data
-			int thread_id;
-			int padding;  // Alignment
-		}
-	]]
+	local thread_control_t = ffi.typeof[[struct {
+// using work_done
+//	volatile int work_available;
+//	volatile int work_done;
+// using semaphores
+	sem_t semWorkReady;
+	sem_t semWorkDone;
+
+	volatile int should_exit;
+	const char* worker_func;  // Serialized worker function
+	size_t worker_func_len;  // Length of serialized worker function
+	const char* work_data;  // Serialized work data
+	size_t work_data_len;  // Length of work data
+	char* result_data;  // Serialized result data
+	size_t result_data_len;  // Length of result data
+	int thread_id;
+	int padding;  // Alignment
+}]]
 	threads.thread_control_t = thread_control_t
 	threads.thread_control_ptr_t = ffi.typeof("$*", thread_control_t)
 	local thread_control_array_t = ffi.typeof("$[?]", thread_control_t)
@@ -362,9 +367,15 @@ do
 
 		-- Initialize control structures
 		for i = 0, num_threads - 1 do
-			local ctrl = self.control[i]
+			local ctrl = self.control + i
+			--[[ using work_done
 			ctrl.work_available = 0
 			ctrl.work_done = 1
+			--]]
+			-- [[ using semaphores
+			ffi.C.sem_init(ctrl.semWorkReady, 0, 0)
+			ffi.C.sem_init(ctrl.semWorkDone, 0, 0)
+			--]]
 			ctrl.should_exit = 0
 			ctrl.worker_func = worker_func_str
 			ctrl.worker_func_len = #worker_func_str
@@ -383,81 +394,123 @@ do
 			local ffi = require("ffi")
 			local threads = require("pureffi.threads")
 			local buffer = require("string.buffer")
-			local control = ffi.cast(threads.thread_control_ptr_t, shared_ptr)
-			local thread_id = control.thread_id
+			local ctrl = ffi.cast(threads.thread_control_ptr_t, shared_ptr)
+			local thread_id = ctrl.thread_id
 			-- Get the actual worker function from the serialized input
-			local worker_func = assert(load(ffi.string(control.worker_func, control.worker_func_len)))
+			local worker_func = assert(load(ffi.string(ctrl.worker_func, ctrl.worker_func_len)))
 
 			-- Thread loop: wait for work, process it, repeat
 			while true do
+				--[[ using work_done
 				-- Check if we should exit
-				if control.should_exit == 1 then break end
-
+				if ctrl.should_exit == 1 then break end
 				-- Check if work is available
-				if control.work_available == 1 then
+				if ctrl.work_available == 1 then
+				--]]
+				-- [[ using semaphores
+				-- one possible TODO is replace semWorkReady with a mutex wrapping a job queue ptr
+				ffi.C.sem_wait(ctrl.semWorkReady)
+				-- Check if we should exit
+				if ctrl.should_exit == 1 then break end
+				do
+				--]]
 					-- Deserialize work data
-					local work = threads.pointer_decode(control.work_data, control.work_data_len)
+					local work = threads.pointer_decode(ctrl.work_data, ctrl.work_data_len)
 					-- Process it with the worker function
 					local result = worker_func(work)
 					local buf, result_ptr, result_len = threads.pointer_encode(result)
-					-- Store result pointer in control structure
-					control.result_data = result_ptr
-					control.result_data_len = result_len
+					-- Store result pointer in ctrl structure
+					ctrl.result_data = result_ptr
+					ctrl.result_data_len = result_len
+					--[[ using work_done
 					-- Mark as done
-					control.work_available = 0
-					control.work_done = 1
+					ctrl.work_available = 0
+					ctrl.work_done = 1
+					--]]
 				end
 
+				-- [[ using semaphores
+				ffi.C.sem_post(ctrl.semWorkDone)
+				--[[ using work_done
 				-- Small sleep to avoid busy-waiting
-				threads.sleep(1)
+				threads.sleep(0)
+				--]]
 			end
 
 			return thread_id
 		end
 
 		-- Create and start persistent threads
+		local ctrl = self.control + 0
 		for i = 1, num_threads do
 			local thread = threads.new(persistent_worker)
 			-- Pass the control structure pointer as shared memory
 			-- and the worker function as serialized data
-			local control_ptr = self.control + (i - 1)
-			thread:run(control_ptr, true)
+			thread:run(ctrl, true)
 			self.thread_objects[i] = thread
+			ctrl = ctrl + 1
 		end
 
 		return self
 	end
 
-	-- Submit work to a specific thread
-	function pool_meta:submit(thread_id, work)
+	-- set work info for a specific thread (without submitting)
+	function pool_meta:setwork(thread_id, work)
 		local idx = thread_id - 1
-		assert(self.control[idx].work_done == 1, "Thread " .. thread_id .. " is still busy")
+		local ctrl = self.control + idx
+
+		--[[ using work_done
+		assert(ctrl.work_done == 1, "Thread " .. thread_id .. " is still busy")
+		--]]
 		local buf, work_ptr, work_len = threads.pointer_encode(work)
 		self.work_buffers[thread_id] = buf -- Keep buffer alive
 		-- Set work data in shared control structure
-		self.control[idx].work_data = work_ptr
-		self.control[idx].work_data_len = work_len
-		self.control[idx].work_done = 0
-		self.control[idx].work_available = 1
+		ctrl.work_data = work_ptr
+		ctrl.work_data_len = work_len
+	end
+
+	-- sets a specific thread's work-ready status to true
+	function pool_meta:ready(thread_id)
+		local idx = thread_id - 1
+		local ctrl = self.control + idx
+
+		--[[ using work_done
+		ctrl.work_done = 0
+		ctrl.work_available = 1
+		--]]
+		-- [[ using semaphores
+		ffi.C.sem_post(ctrl.semWorkReady)
+		--]]
+	end
+
+	-- Submit work to a specific thread
+	function pool_meta:submit(thread_id, work)
+		self:setwork(thread_id, work)
+		self:ready(thread_id)
 	end
 
 	-- Wait for a specific thread to complete
 	function pool_meta:wait(thread_id)
 		local idx = thread_id - 1
+		local ctrl = self.control + idx
 
-		while self.control[idx].work_done == 0 do
-			threads.sleep(1)
+		--[[ using work_done
+		while ctrl.work_done == 0 do
+			threads.sleep(0)
 		end
+		--]]
+		-- [[ using semaphores
+		ffi.C.sem_wait(ctrl.semWorkDone)
+		--]]
 
-		return threads.pointer_decode(self.control[idx].result_data, self.control[idx].result_data_len)
+		return threads.pointer_decode(ctrl.result_data, ctrl.result_data_len)
 	end
 
 	-- Submit work to all threads
 	function pool_meta:submit_all(work_items)
-		assert(
-			#work_items == self.num_threads,
-			"Must provide work for all " .. self.num_threads .. " threads"
-		)
+		if #work_items ~= self.num_threads then
+			error("Must provide work for all " .. self.num_threads .. " threads")
+		end
 
 		for i = 1, self.num_threads do
 			self:submit(i, work_items[i])
@@ -475,17 +528,38 @@ do
 		return results
 	end
 
+	function pool_meta:iterate()
+		for i=0,self.num_threads - 1 do
+			ffi.C.sem_post(self.control[i].semWorkReady)
+		end
+		for i=0,self.num_threads - 1 do
+			ffi.C.sem_wait(self.control[i].semWorkDone)
+		end
+	end
+
 	-- Shutdown the thread pool
 	function pool_meta:shutdown()
 		-- Signal all threads to exit
+		local ctrl = self.control + 0
 		for i = 0,self.num_threads - 1 do
-			self.control[i].should_exit = 1
+			ctrl.should_exit = 1
+			-- [[ using semaphores
+			-- wake it up from looking for work to have it quit
+			ffi.C.sem_post(ctrl.semWorkReady)
+			--]]
+			ctrl = ctrl + 1
 		end
 
 		-- Wait for threads to exit and clean up
+		ctrl = self.control + 0
 		for i = 1,self.num_threads do
 			self.thread_objects[i]:join()
+			-- [[ using semaphores
+			ffi.C.sem_destroy(ctrl.semWorkReady)
+			ffi.C.sem_destroy(ctrl.semWorkDone)
+			--]]
 			self.thread_objects[i]:close()
+			ctrl = ctrl + 1
 		end
 
 		self.thread_objects = {}
