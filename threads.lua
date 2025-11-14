@@ -108,13 +108,8 @@ void Sleep(uint32_t dwMilliseconds);
 		ffi.C.Sleep(ms)
 	end
 else
-	require 'ffi.req' 'c.pthread'	-- pthread_create, pthread_join
+	local pt = require 'ffi.req' 'c.pthread'	-- pthread_create, pthread_join
 	require 'ffi.req' 'c.unistd'	-- sysconf, usleep
-
-	-- needed? not on linux?
-	--local pt = ffi.load("pthread")
-	--local pt = ffi.load("libpthread.so.0")
-	local pt = ffi.C
 
 	-- Enhanced pthread error checking
 	local function check_pthread(int)
